@@ -1,0 +1,8 @@
+%rename link                old_link
+
+*link:
+%(old_link) -T ../custom_arm7.ld%s --gc-sections --no-warn-rwx-segments
+
+*startfile:
+crti%O%s crtbegin%O%s
+
