@@ -26,7 +26,7 @@ struct WMGameInfo {
     }; // offset 10
 };
 
-extern struct OSMessageQueue wvrSendMsgQueue, wvrRecvMsgQueue, wvrConfirmQueue, wvrIndicateQueue;
+extern OSMessageQueue wvrSendMsgQueue, wvrRecvMsgQueue, wvrConfirmQueue, wvrIndicateQueue;
 
 WlMlmeResetCfm * WiFi_MlmeReset(u16 mib); 
 WlMlmePowerMgtCfm * WiFi_MlmePowerMgt(u16 pwrMgtMode, u16 wakeUp, u16 recieveDtims); 

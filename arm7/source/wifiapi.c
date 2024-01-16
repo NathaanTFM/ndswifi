@@ -3,7 +3,9 @@
 #include <string.h>
 
 #define MARIONEA_INTERNAL 1
-#include "WifiApi.h"
+#include "wifiapi.h"
+
+extern void myprintf(const char *format, ...);
 
 #undef REG_IME
 #undef REG_IE

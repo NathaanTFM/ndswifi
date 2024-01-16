@@ -8,13 +8,11 @@
 #undef REG_IME
 
 #include "PublicSdk.h"
-
+#include "timer.h"
+#include "alarm.h"
 
 #define REG_IE (*(volatile u32*)0x04000210)
 #define REG_IF (*(volatile u32*)0x04000214)
-
-static volatile u64 tickCount = 0;
-static struct OSiAlarm *gAlarm = 0;
 
 void MIi_CpuClear16(u16 data, void* destp, u32 size) {
     for (u32 i = 0; i < size/2; i++) {
@@ -41,11 +39,10 @@ void MIi_CpuCopy32(const void* srcp, void* destp, u32 size) {
         ((u32*)destp)[i] = ((u32*)srcp)[i];
     }
 }
-void* OS_AllocFromHeap(enum OSArena id, int heap, u32 size) {
-    myprintf("alloc from heap?");
+void* OS_AllocFromHeap(OSArena id, int heap, u32 size) {
     return malloc(size);
 }
-void OS_FreeToHeap(enum OSArena id, int heap, void* ptr) {
+void OS_FreeToHeap(OSArena id, int heap, void* ptr) {
     free(ptr);
 }
 u32 OS_EnableIrqMask(u32 intr) {
@@ -75,7 +72,7 @@ void SPI_Unlock(u32 id) {
     // We probably don't need this?
 }
 
-int OS_SendMessage(struct OSMessageQueue* mq, void* msg, s32 flags) {
+int OS_SendMessage(OSMessageQueue* mq, void* msg, s32 flags) {
     // We need to send pMsg
     int prev = OS_DisableInterrupts();
     
@@ -105,7 +102,7 @@ int OS_SendMessage(struct OSMessageQueue* mq, void* msg, s32 flags) {
     return 1;
 }
 
-int OS_ReceiveMessage(struct OSMessageQueue* mq, void** msg, s32 flags) {
+int OS_ReceiveMessage(OSMessageQueue* mq, void** msg, s32 flags) {
     int prev = OS_DisableInterrupts();
     
     if (mq->available == 0) {
@@ -140,52 +137,27 @@ int OS_IsAlarmAvailable() {
     return 1;
 }
 
-void OS_CreateAlarm(struct OSiAlarm* alarm) {
-    alarm->handler = 0;
-    alarm->period = alarm->start = alarm->fire = 0;
-    
-    alarm->next = gAlarm;
-    gAlarm = alarm;
+void OS_CreateAlarm(OSAlarm* alarm) {
+    createAlarm((Alarm*)alarm);
 }
 
-void OS_SetAlarm(struct OSiAlarm* alarm, u64 tick, void (*handler)(void*), void* arg) {
-    alarm->fire = OS_GetTick() + tick;
-    alarm->handler = handler;
-    alarm->arg = arg;
-    alarm->start = alarm->period = 0;
+void OS_SetAlarm(OSAlarm* alarm, u64 tick, void (*handler)(void*), void* arg) {
+    setAlarm((Alarm *)alarm, tick, handler, arg);
 }
 
-void OS_SetPeriodicAlarm(struct OSiAlarm* alarm, u64 start, u64 period, void (*handler)(void*), void* arg) {
-    alarm->handler = handler;
-    alarm->arg = arg;
-    alarm->start = start;
-    alarm->period = period;
-    alarm->fire = alarm->start;
+void OS_SetPeriodicAlarm(OSAlarm* alarm, u64 start, u64 period, void (*handler)(void*), void* arg) {
+    setPeriodicAlarm((Alarm *)alarm, start, period, handler, arg);
 }
 
-void OS_CancelAlarm(struct OSiAlarm* alarm) {
-    alarm->handler = 0;
-    alarm->arg = 0;
+void OS_CancelAlarm(OSAlarm* alarm) {
+    cancelAlarm((Alarm *)alarm);
 }
 
 u64 OS_GetTick() {
-    u16 low;
-    u64 high;
-
-    int prev = OS_DisableInterrupts();
-
-    low = TIMER_DATA(0);
-    high = tickCount & 0xFFFFFFFFFFFFULL;
-
-    if ((REG_IF & (1<<3)) != 0 && (low & 0x8000) == 0) {
-        high++;
-    }
-
-    OS_RestoreInterrupts(prev);
-    return (high << 16) | low;
+    return getTick();
 }
 
-void OS_CreateThread(struct _OSThread* thread, void (*func)(void*), void* arg, void* stack, u32 stackSize, u32 prio) {
+void OS_CreateThread(OSThread* thread, void (*func)(void*), void* arg, void* stack, u32 stackSize, u32 prio) {
     // We are running threadless,
     // we have a custom wrapper around the message getter which is not inside a thread
 }
@@ -194,7 +166,7 @@ void OS_ExitThread() {
     // Same here, no thread
 }
 
-void OS_WakeupThreadDirect(struct _OSThread* thread) {
+void OS_WakeupThreadDirect(OSThread* thread) {
     // Same here, no thread
 }
 
@@ -287,41 +259,7 @@ u32 OS_RestoreInterrupts(u32 state) {
     return OS_RestoreIrq(state);
 }
 
-static void IncreaseTickCount() {
-    tickCount++;
-    
-    u32 x = OS_DisableInterrupts();
-    u64 tick = OS_GetTick();
-    
-    struct OSiAlarm *alarm = gAlarm;
-    while (alarm) {
-        while (alarm->handler != 0 && alarm->fire < tick) {
-            void (*fn)(void *arg) = alarm->handler;            
-            if (alarm->period != 0) {
-                alarm->fire += alarm->period;
-            } else {
-                alarm->handler = 0;
-            }
-            
-            fn(alarm->arg);
-            tick = OS_GetTick();
-        }
-        alarm = alarm->next;
-    }
-    
-    OS_RestoreInterrupts(x);
- }
-
-void InitSdk() {
-    timerStart(
-        0,
-        ClockDivider_64 ,
-        0,
-        &IncreaseTickCount
-    );
-}
-
-void InitMsgQueue(struct OSMessageQueue* mq, void **array, u16 length) {
+void InitMsgQueue(OSMessageQueue* mq, void **array, u16 length) {
     mq->length = length;
     mq->array = array;
     mq->index = mq->available = 0;

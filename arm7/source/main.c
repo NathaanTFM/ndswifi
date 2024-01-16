@@ -5,8 +5,8 @@
 #include <string.h>
 
 #include "Marionea.h"
-#include "WifiApi.h"
-
+#include "wifiapi.h"
+#include "timer.h"
 
 //---------------------------------------------------------------------------------
 void VblankHandler(void) {
@@ -62,8 +62,8 @@ int main() {
     }
     
     myprintf("Initializing Wi-Fi\n");
-    extern int getTaskId();
-    InitSdk();
+    initTimer();
+    
     InitWiFi();
 
 
