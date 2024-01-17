@@ -1,14 +1,15 @@
 #include "alarm.h"
 #include "timer.h"
 #include <nds.h>
+#include <stdbool.h>
 
-static Alarm *alarmList = NULL;
+static Alarm *volatile alarmList = NULL;
 
 void alarmIrqAligned();
 extern void alarmIrq();
 static void setAlarmTimer();
-static void removeAlarm(Alarm *alarm, bool bSetTimer);
-static void insertAlarm(Alarm *alarm, bool bSetTimer);
+static bool removeAlarm(Alarm *alarm);
+static bool insertAlarm(Alarm *alarm);
 
 void alarmIrqAligned() {
     int x = enterCriticalSection();
@@ -27,7 +28,7 @@ void alarmIrqAligned() {
             alarm->fire += alarm->period;
             
             // slow insert
-            insertAlarm(alarm, false);   
+            insertAlarm(alarm);   
         }
         
         alarm->handler(alarm->arg);
@@ -72,14 +73,15 @@ static void setAlarmTimer() {
     }
 }
 
-static void removeAlarm(Alarm *alarm, bool bSetTimer) {
+static bool removeAlarm(Alarm *alarm) {
+    bool firstChanged = false;
+    
     if (alarm->prev == NULL) {
         // first element, or not in
         if (alarmList == alarm) {
             // first element (or only one)
             alarmList = alarm->next;
-            if (bSetTimer)
-                setAlarmTimer();
+            firstChanged = true;
         }
         
         if (alarm->next) {
@@ -96,9 +98,13 @@ static void removeAlarm(Alarm *alarm, bool bSetTimer) {
         
         alarm->prev = NULL;
     }
+    
+    return firstChanged;
 }
 
-static void insertAlarm(Alarm *alarm, bool bSetTimer) {    
+static bool insertAlarm(Alarm *alarm) {
+    bool firstChanged = false;
+    
     Alarm *prev = NULL;
     Alarm *cur = alarmList;
     
@@ -115,8 +121,7 @@ static void insertAlarm(Alarm *alarm, bool bSetTimer) {
             // the array was empty
             alarmList = alarm;
             alarm->next = alarm->prev = NULL;
-            if (bSetTimer)
-                setAlarmTimer();
+            firstChanged = true;
             
         } else {
             // we reached the end of the array
@@ -131,8 +136,7 @@ static void insertAlarm(Alarm *alarm, bool bSetTimer) {
             alarmList = alarm;
             alarm->next = cur;
             alarm->prev = NULL;
-            if (bSetTimer)
-                setAlarmTimer();
+            firstChanged = true;
             
         } else {
             // we are between two of them
@@ -142,10 +146,12 @@ static void insertAlarm(Alarm *alarm, bool bSetTimer) {
             cur->prev = alarm;
         }
     }
+    
+    return firstChanged;
 }
 
 void createAlarm(Alarm *alarm) {
-    alarm->handler = NULL;
+    alarm->handler = alarm->arg = NULL;
     alarm->period = alarm->start = alarm->fire = 0;
     alarm->next = alarm->prev = NULL;
 }
@@ -158,8 +164,11 @@ void setAlarm(Alarm *alarm, u64 tick, void (*handler)(void *), void *arg) {
     alarm->arg = arg;
     alarm->start = alarm->period = 0;
     
-    removeAlarm(alarm, false);
-    insertAlarm(alarm, true);
+    bool flag = removeAlarm(alarm);
+    flag |= insertAlarm(alarm);
+    if (flag)
+        setAlarmTimer();
+    
     leaveCriticalSection(x);
 }
 
@@ -172,17 +181,19 @@ void setPeriodicAlarm(Alarm *alarm, u64 start, u64 period, void (*handler)(void 
     alarm->period = period;
     alarm->fire = alarm->start;
     
-    removeAlarm(alarm, false);
-    insertAlarm(alarm, true);
+    bool flag = removeAlarm(alarm);
+    flag |= insertAlarm(alarm);
+    if (flag)
+        setAlarmTimer();
+    
     leaveCriticalSection(x);
 }
 
 void cancelAlarm(Alarm *alarm) {
     int x = enterCriticalSection();
     
-    alarm->handler = NULL;
-    alarm->arg = 0;
+    if (removeAlarm(alarm))
+        setAlarmTimer();
     
-    removeAlarm(alarm, true);
     leaveCriticalSection(x);
 }
