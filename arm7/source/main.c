@@ -4,30 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "Marionea.h"
 #include "wifiapi.h"
 #include "timer.h"
-
-//---------------------------------------------------------------------------------
-void VblankHandler(void) {
-//---------------------------------------------------------------------------------
-
-}
-
-
-//---------------------------------------------------------------------------------
-void VcountHandler() {
-//---------------------------------------------------------------------------------
-	inputGetAndSend();
-}
+#include "valarm.h"
 
 volatile bool exitflag = false;
-
-//---------------------------------------------------------------------------------
-void powerButtonCB() {
-//---------------------------------------------------------------------------------
-	exitflag = true;
-}
 
 void myprintf(const char *format, ...) {
     static char buffer[128];
@@ -43,6 +24,7 @@ void myprintmac(u16 macAdrs[3]) {
     myprintf("%02X:%02X:%02X:%02X:%02X:%02X", ((u8*)macAdrs)[0], ((u8*)macAdrs)[1], ((u8*)macAdrs)[2], ((u8*)macAdrs)[3], ((u8*)macAdrs)[4], ((u8*)macAdrs)[5]);
 }
 
+
 //---------------------------------------------------------------------------------
 int main() {
 //---------------------------------------------------------------------------------
@@ -50,124 +32,55 @@ int main() {
 	fifoInit();
 	initClockIRQ();
 	installSystemFIFO();
-	irqSet(IRQ_VCOUNT, VcountHandler);
-	irqSet(IRQ_VBLANK, VblankHandler);
 
-	irqEnable( IRQ_VBLANK | IRQ_VCOUNT | IRQ_NETWORK);
 	// Start the RTC tracking IRQ
     
     myprintf("Hello from ARM7!\n");
-    for (int i = 0; i < 10; i++) {
-        swiWaitForVBlank();
-    }
-    
-    myprintf("Initializing Wi-Fi\n");
+    irqEnable(IRQ_VBLANK);
     initTimer();
     
+    myprintf("Initializing Wi-Fi\n");
     InitWiFi();
-
-
-	setPowerButtonCB(powerButtonCB);
     
-    WiFi_DevIdle();
-    WiFi_DevClass1();
+    int ret = WiFi_Initialize(0);
+    myprintf("ret %i\n", ret);
     
-    myprintf("MlmeScan... ");
-    WlMlmeScanCfm *pCfm = (void*)WiFi_MlmeScan(0, (u16[]){0xFFFF, 0xFFFF, 0xFFFF}, 0, 0, 1, (u8[16]){1,7,13,0}, 1000);
-    myprintf("%u -> %u\n", pCfm->resultCode, pCfm->bssDescCount);
+    static u8 scanBuf[sizeof(WMBssDesc) * 8];
+    static u32 recvBuf[0x200], sendBuf[0x200];
+    static WMMPParam param;
+    static WMMPTmpParam tmpParam;
     
-    WlBssDesc *bssDesc = pCfm->bssDescList;
-    for (int i = 0; i < pCfm->bssDescCount; i++) {
-        myprintf("SSIDLength %u\n", bssDesc->ssidLength);
-        
-        WlBssDesc bssDescCopy;
-        struct WMGameInfo gameInfo;
-        if (bssDesc->ssidLength == 0) {
-            u16 bssid[3];
-            memcpy(&bssDescCopy, bssDesc, sizeof(bssDescCopy));
-            #define MIN(a, b) (((a) < (b)) ? (a) : (b))
+    myprintf("scanbuf %u\n", sizeof(scanBuf));
+    u16 bssid[3] = {0xFFFF, 0xFFFF, 0xFFFF};
+    ret = WiFi_StartScanEx((1<<1)|(1<<7)|(1<<13), scanBuf, sizeof(scanBuf), 500, bssid, 1, 0, NULL, 0);
+    myprintf("ret %i\n", ret);
+    
+    int ret2 = WiFi_EndScan();
+    myprintf("endscan %i\n", ret2);
+    
+    WMBssDesc *bssDesc = NULL;
+    
+    if (ret < 0) {
+        u8 *buf = scanBuf;
+        for (int i = 0; i < -ret; i++) {
+            WMBssDesc *desc = (WMBssDesc *)buf;
+            buf += (desc->length * 2);
             
-            memcpy(&gameInfo, bssDesc->gameInfo, MIN(bssDesc->gameInfoLength, sizeof(gameInfo)));
-            
-            WlParamSetAllReq req;
-            
-            if (bssDesc->rateSet.basic & 2)
-                req.rate = 2;
-            else
-                req.rate = 1;
-            
-            req.preambleType = (bssDesc->capaInfo & 0x20) != 0;
-            myprintf("RateSet %04X %04X\n", bssDesc->rateSet.basic, bssDesc->rateSet.support);
-            myprintf("GameInfo %04X\n", bssDesc->gameInfoLength);
-            
-            if (bssDesc->gameInfoLength)
-                req.mode = 2;
-            else
-                req.mode = 3;
-            
-            req.retryLimit = 7;
-            
-            myprintf("CapaInfo %04X\n", bssDesc->capaInfo);
-            if (bssDesc->capaInfo & 0x10) {
-                req.wepMode = 0; // ???
-                req.wepKeyId = 0; // ???
-                memset(req.wepKey, 0x50, sizeof(req.wepKey));
-                req.authAlgo = 1;
-            } else {
-                req.wepMode = 0;
-                req.wepKeyId = 0;
-                memset(req.wepKey, 0, sizeof(req.wepKey));
-                req.authAlgo = 0;
+            myprintf("desc->gameInfoLength %i\n", desc->gameInfoLength);
+            if (desc->gameInfoLength) {
+                bssDesc = desc;
+                break;
             }
-            
-            req.beaconLostTh = /*16*/ 254;
-            req.activeZoneTime = 10;
-            req.probeRes = 1;
-            req.beaconType = 1;
-            req.enableChannel = 0xFFFF; // idk, bitflag probably
-            
-            // this will be our new mac address lol
-            memcpy(req.staMacAdrs, (u16[]){0xA278,0x83A0,0xC825}, sizeof(req.staMacAdrs));
-            
-            // SSID mask for some reason
-            memset(req.ssidMask, 0, 8);
-            memset(req.ssidMask+8, 0xFF, 24);
-            
-            WiFi_DevIdle();
-            
-            myprintf("ParamSetAll... ");
-            WlParamSetCfm *pCfm2 = WiFi_ParamSetAll(&req);
-            myprintf("%u\n", pCfm2->resultCode);
-            
-            WiFi_DevClass1();
-            WiFi_MlmePowerMgt(0, 0, 1);
-            
-            myprintf("%02X:%02X:%02X:%02X:%02X:%02X\n", ((u8*)bssDescCopy.bssid)[0], ((u8*)bssDescCopy.bssid)[1], ((u8*)bssDescCopy.bssid)[2], ((u8*)bssDescCopy.bssid)[3], ((u8*)bssDescCopy.bssid)[4], ((u8*)bssDescCopy.bssid)[5]);
-            
-            WiFi_DevClass1();
-            WiFi_MlmePowerMgt(0, 0, 1);
-            
-            bssDescCopy.ssidLength = 32;
-            memcpy(bssDescCopy.ssid, &gameInfo.ggid, 4);
-            memcpy(bssDescCopy.ssid+4, &gameInfo.tgid, 2);
-            memset(bssDescCopy.ssid+6, 0, 2);
-            memset(bssDescCopy.ssid+8, bssDescCopy.ssid[8], 32-8);
-            
-            myprintf("MlmeJoin... ");
-            WlMlmeJoinCfm *pCfm3 = WiFi_MlmeJoin(2000, &bssDescCopy);
-            myprintf("%u\n", pCfm3->resultCode);
-            myprintf("MlmeAuth... ");
-            WlMlmeAuthCfm *pCfm4 = WiFi_MlmeAuth(bssDescCopy.bssid, 0, 2000);
-            myprintf("%u\n", pCfm4->resultCode);
-            myprintf("MlmeAss... ");
-            WlMlmeAssCfm *pCfm5 = WiFi_MlmeAss(bssDescCopy.bssid, 1, 2000);
-            myprintf("%u\n", pCfm5->resultCode);
-            WiFi_DevIdle();
-            
-            break;
         }
+    }
+    
+    if (bssDesc) {
+        u8 ssid[24];
+        memset(ssid, 0, sizeof(ssid));
+        ret = WiFi_StartConnectEx(bssDesc, ssid, 0, 0);
+        myprintf("ret %i\n", ret);
         
-        bssDesc = (WlBssDesc*)((u16*)bssDesc + bssDesc->length);
+        WiFi_StartMP
     }
     
 	// Keep the ARM7 mostly idle
@@ -176,80 +89,7 @@ int main() {
 			exitflag = true;
 		}
         
-        void *msg;
-        if (OS_ReceiveMessage(&wvrIndicateQueue, &msg, 0)) {
-            WlCmdReq *pReq = (WlCmdReq *)msg;
-            
-            switch (pReq->header.code) {
-                case 0x84: {
-                    WlMlmeAuthInd *pInd = (WlMlmeAuthInd *)msg;
-                    myprintf("== WlMlmeAuthInd ==\nMAC: ");
-                    myprintmac(pInd->peerMacAdrs);
-                    myprintf("\nALGO: %u\n\n", pInd->algorithm);
-                    break;
-                }
-                    
-                case 0x85: {
-                    WlMlmeDeAuthInd *pInd = (WlMlmeDeAuthInd *)msg;
-                    myprintf("== WlMlmeDeAuthInd ==\nMAC: ");
-                    myprintmac(pInd->peerMacAdrs);
-                    myprintf("\nREASON: %u\n\n", pInd->reasonCode);
-                    break;
-                }
-                    
-                case 0x86: {
-                    WlMlmeAssInd *pInd = (WlMlmeAssInd *)msg;
-                    myprintf("== WlMlmeAssInd ==\nMAC: ");
-                    myprintmac(pInd->peerMacAdrs);
-                    myprintf("\nAID: %u\n\n", pInd->aid);
-                    myprintf("\nSSIDLEN: %u\n\n", pInd->ssidLength);
-                    break;
-                }
-                    
-                case 0x87: {
-                    WlMlmeReAssInd *pInd = (WlMlmeReAssInd *)msg;
-                    myprintf("== WlMlmeReAssInd ==\nMAC: ");
-                    myprintf("\nAID: %u\n\n", pInd->aid);
-                    myprintf("\nSSIDLEN: %u\n\n", pInd->ssidLength);
-                    break;
-                }
-                
-                case 0x88: {
-                    WlMlmeDisAssInd *pInd = (WlMlmeDisAssInd *)msg;
-                    myprintf("== WlMlmeDisAssInd ==\nMAC: ");
-                    myprintmac(pInd->peerMacAdrs);
-                    myprintf("\nREASON: %u\n\n", pInd->reasonCode);
-                    break;
-                }
-                
-                case 0x8B: {
-                    WlMlmeBeaconLostInd *pInd = (WlMlmeBeaconLostInd *)msg;
-                    myprintf("== WlMlmeBeaconLostInd ==\nAP: ");
-                    myprintmac(pInd->apMacAdrs);
-                    myprintf("\n\n");
-                    break;
-                }
-                
-                case 0x8C: {
-                    WlMlmeBeaconSendInd *pInd = (WlMlmeBeaconSendInd *)msg;
-                    myprintf("== WlMlmeBeaconSendInd ==\n\n");
-                    break;
-                }
-                
-                case 0x8D: {
-                    WlMlmeBeaconRecvInd *pInd = (WlMlmeBeaconRecvInd *)msg;
-                    myprintf("== WlMlmeBeaconRecvInd ==\n\n");
-                    break;
-                }
-            }
-            
-            free(pReq);
-        }
         UpdateWiFi();
-        
-        //u64 tick = OS_GetTick();
-        //fifoSendDatamsg(FIFO_USER_01, sizeof(tick), (u8*)&tick);
-        //UpdateWiFi();
 		swiWaitForVBlank();
 	}
 	return 0;

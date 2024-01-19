@@ -98,6 +98,7 @@ SECTIONS
         *WlIntrTask.o   (.text .text* .rodata .rodata*)
         *WlNic.o        (.text .text* .rodata .rodata*)
         *WlSys.o        (.text .text* .rodata .rodata*)
+        *wifiapi.o      (.text .text* .rodata .rodata* .bss .bss*)
 		__wifi_end__ = .;
         . = ALIGN(4);
     } >wifi AT>ewram :wifi
