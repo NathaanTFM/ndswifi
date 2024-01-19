@@ -80,7 +80,6 @@ int main() {
         ret = WiFi_StartConnectEx(bssDesc, ssid, 0, 0);
         myprintf("ret %i\n", ret);
         
-        WiFi_StartMP
     }
     
 	// Keep the ARM7 mostly idle
