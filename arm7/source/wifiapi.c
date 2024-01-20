@@ -3,7 +3,9 @@
 
 #define MARIONEA_INTERNAL 1
 #include "wifiapi.h"
+#include "alarm.h"
 #include "valarm.h"
+#include "timer.h"
 
 /* Commands */
 static struct WiFiWork {
@@ -99,6 +101,7 @@ static struct WiFiWork {
     u16 mp_current_ignoreFatalErrorMode;
     u16 mp_current_minPollBmpMode;
     u16 mp_current_singlePacketMode;
+    u16 mp_ackTime;
     
     WMParentParam pparam;
     
@@ -1009,7 +1012,7 @@ int WiFi_StartConnectEx(WMBssDesc *bssDesc, u8 ssid[24], int powerSave, u16 auth
     wifiWork.child_bitmap = 1;
     wifiWork.mp_readyBitmap = 1;
     if (wifiWork.mp_lifeTimeTick != 0) {
-        wifiWork.mp_lastRecvTick[0] = OS_GetTick() | 1;
+        wifiWork.mp_lastRecvTick[0] = getTick() | 1;
     }
     
     wifiWork.state = 8; // probably connected or something like that
@@ -1150,7 +1153,7 @@ int WiFi_StartMP(u32 *recvBuf, u32 recvBufSize, u32 *sendBuf, u32 sendBufSize, W
     wifiWork.minRssi = 0xFFFF;
     wifiWork.rssiCounter = 1;
     
-    u64 tick = OS_GetTick() | 1;
+    u64 tick = getTick() | 1;
     for (int i = 0; i < 16; i++) {
         wifiWork.mp_lastRecvTick[i] = tick;
     }
@@ -1659,7 +1662,7 @@ static void ChildVAlarmMP(void *unused) {
     if (wifiWork.mp_flag == 1) {
         setVAlarm(&wifiWork.valarm, 200, 263, ChildAdjustVSync1, NULL);
         if (wifiWork.mp_lifeTimeTick != 0) {
-            u64 tick = OS_GetTick() | 1;
+            u64 tick = getTick() | 1;
             
             if (wifiWork.mp_lastRecvTick[0] != 0 && (tick - wifiWork.mp_lastRecvTick[0]) > wifiWork.mp_lifeTimeTick) {
                 wifiWork.mp_lastRecvTick[0] = 0;
@@ -1767,18 +1770,97 @@ static void DriverLoop() {
 }
 
 static void IndicateMlmeAuthenticate(WlCmdReq *req) {
+    // It's sent to ARM9
 }
 
 static void IndicateMlmeDeAuthenticate(WlCmdReq *req) {
+    WlMlmeDeAuthInd *ind = (WlMlmeDeAuthInd *)req;
+    
+    if (wifiWork.state == 7 || wifiWork.state == 9) {
+        int x = enterCriticalSection();
+        int aid;
+        
+        for (aid = 1; aid < 16; aid++) {
+            if ((wifiWork.child_bitmap & (1 << aid)) != 0 && memcmp(ind->peerMacAdrs, wifiWork.childMacAddress[aid-1], 6) == 0) {
+                wifiWork.child_bitmap &= ~(1 << aid);
+                wifiWork.mp_readyBitmap &= ~(1 << aid);
+                wifiWork.mp_lastRecvTick[aid] = 0;
+                memset(wifiWork.childMacAddress[aid-1], 0, 6);
+                break;
+            }
+        }
+        
+        leaveCriticalSection(x);
+        
+        if (aid) {
+            // transmit to ARM9
+        }
+        
+    } else {
+        int x = enterCriticalSection();
+        
+        if (wifiWork.child_bitmap != 0) {
+            bool bCleanQueue = false;
+            if (wifiWork.mp_flag == 1) {
+                wifiWork.mp_flag = 0;
+                bCleanQueue = true;
+                WiFi_CancelVAlarm();
+                // SetThreadPriorityLow
+            }
+            wifiWork.child_bitmap = 0;
+            wifiWork.mp_readyBitmap = 0;
+            wifiWork.ks_flag = 0;
+            wifiWork.dcf_flag = 0;
+            wifiWork.VSyncFlag = 0;
+            WiFi_ResetSizeVars();
+            wifiWork.beaconIndicateFlag = 0;
+            wifiWork.state = 3;
+            
+            leaveCriticalSection(x);
+            
+            // Transmit to ARM9
+            
+            if (bCleanQueue)
+                WiFi_CleanSendQueue(1);
+            
+        } else {
+            leaveCriticalSection(x);
+        }
+    }
 }
 
 static void IndicateMlmeAssociate(WlCmdReq *req) {
+    WlMlmeAssInd *ind = (WlMlmeAssInd *)req;
+    
+    if (ind->aid > 0 && ind->aid < 16) {
+        if (wifiWork.pparam.entryFlag) {
+            int x = enterCriticalSection();
+            wifiWork.child_bitmap |= (1 << ind->aid);
+            wifiWork.mp_readyBitmap &= ~(1 << ind->aid);
+            u64 tick = getTick() | 1;
+            wifiWork.mp_lastRecvTick[ind->aid] = tick;
+            memcpy(wifiWork.childMacAddress[ind->aid - 1], ind->peerMacAdrs, 6);
+            leaveCriticalSection(x);
+            
+            memset(wifiWork.portSeqNo[ind->aid], 0, 0x10);
+            
+            // callback to ARM9
+            
+        } else {
+            // internal request to WiFi_AutoDeAuth
+        }
+        
+    } else {
+        // invalid aid %d !
+    }
 }
 
 static void IndicateMlmeReAssociate(WlCmdReq *req) {
+    // callback to ARM9
 }
 
 static void IndicateMlmeDisAssociate(WlCmdReq *req) {
+    // callback to ARM9
 }
 
 static void IndicateMlmeBeaconLost(WlCmdReq *req) {
@@ -1791,9 +1873,114 @@ static void IndicateMlmeBeaconRecv(WlCmdReq *req) {
 }
 
 static void IndicateMaData(WlCmdReq *req) {
+    WlMaDataInd *ind = (WlMaDataInd *)req;
+    
+    if (wifiWork.dcf_flag) {
+        // RSSI...
+        
+        if (!WiFi_CheckMacAddress(ind->frame.srcAdrs) && ind->frame.length <= 0x5E4) {
+            //wifiWork.dcf_recvBufSel ^= 1;
+            // DCF stuff, then ARM9 callback
+        }
+    }
+}
+
+static void MaMultiPollAckAlarmCallback(void *unused) {
 }
 
 static void IndicateMaMultiPoll(WlCmdReq *req) {
+    // RSSI...
+    WlMaMpInd *ind = (WlMaMpInd *)ind;
+    
+    if (wifiWork.mp_flag) {
+        if (wifiWork.mp_vsyncFlag == 1)
+            wifiWork.mp_vsyncFlag = 0;
+        
+        u16 emptyFlag = wifiWork.mp_bufferEmptyFlag;
+        
+        wifiWork.mp_recvBufSel ^= 1;
+        WMMpRecvBuf *recvBuf = wifiWork.mp_recvBuf[wifiWork.mp_recvBufSel];
+        
+        u32 size = ind->frame.length + 48;
+        if (size > wifiWork.mp_recvBufSize) {
+            size = wifiWork.mp_recvBufSize;
+        }
+        
+        memcpy(recvBuf, &ind->frame, size);
+        
+        int x = enterCriticalSection();
+        
+        bool bUnk = false;
+        
+        if (wifiWork.mp_waitAckFlag) {
+            bUnk = true;
+            cancelAlarm(&wifiWork.mpAckAlarm);
+        }
+        
+        wifiWork.mp_waitAckFlag = 1;
+        wifiWork.mp_ackTime = recvBuf->ackTimeStamp;
+        wifiWork.mp_isPolledFlag = ((ind->frame.txKeySts & 0x2000) == 0x2000);
+        
+        // idk the formula
+        u32 tmp = 16 * ((u16)(recvBuf->ackTimeStamp - recvBuf->timeStamp) + 128);
+        u64 tick = (33514 * (u64)tmp) >> 16;
+        
+        setAlarm(&wifiWork.mpAckAlarm, tick, MaMultiPollAckAlarmCallback, NULL);
+        
+        // mp_setDataFlag has been removed
+        wifiWork.mp_bufferEmptyFlag = ((ind->frame.txKeySts & 0x2800) == 0x2800);
+        wifiWork.mp_sentDataFlag = ((ind->frame.txKeySts & 0x6000) == 0x6000);
+        
+        if (wifiWork.mp_isPolledFlag) {
+            s32 childSize = ((recvBuf->txop - 102) / 4) - 32;
+            if (childSize >= 0) {
+                if (childSize > wifiWork.mp_childMaxSize)
+                    childSize = wifiWork.mp_childMaxSize;
+                
+                if (childSize != wifiWork.mp_childSize)
+                    WiFi_SetChildSize(childSize);
+            }
+        }
+        
+        leaveCriticalSection(x);
+        
+        if (bUnk) {
+            if (emptyFlag)
+                WiFi_FlushSendQueue(1, 0);
+            
+            // arm9 stuff here
+        }
+        
+        if (wifiWork.mp_isPolledFlag) {
+            // isn't this useless?
+            memcpy(recvBuf->destAdrs, ind->frame.destAdrs, 6);
+            memcpy(recvBuf->srcAdrs, ind->frame.srcAdrs, 6);
+            
+            if (recvBuf->length < 2) {
+                recvBuf->length = 0;
+                
+                // arm9 stuff here
+                
+            } else {
+                recvBuf->length -= 2;
+                wifiWork.mp_vsyncOrderedFlag = ((recvBuf->wmHeader & 0x8000) == 0x8000);
+                
+                // arm9 stuff
+                
+                if (recvBuf->length != 0)
+                    WiFi_ParsePortPacket(0, recvBuf->wmHeader, recvBuf->data, recvBuf->length, recvBuf);
+            }
+            
+            if (wifiWork.mp_lifeTimeTick != 0) {
+                wifiWork.mp_lastRecvTick[0] = getTick() | 1;
+            }
+            
+        } else {
+            if (recvBuf->length >= 2) {
+                wifiWork.mp_vsyncOrderedFlag = ((recvBuf->wmHeader & 0x8000) == 0x8000);
+            }
+        }
+    }
 }
 
 static void IndicateMaMultiPollEnd(WlCmdReq *req) {
